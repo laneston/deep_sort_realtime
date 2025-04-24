@@ -125,15 +125,136 @@ $${{∥{{a}_{i}}-{{b}_{j}}∥}^{2}}=\sum_{k=1}^{d}{{{({{a}_{ik}}-{{b}_{jk}})}^{2
 - ​意义​：增强数值稳定性，符合欧氏距离的物理意义。
 
 
+# 计算单个目标框与多个候选框的交并比（IoU）
+
+```
+def iou(bbox, candidates):
+    """Computer intersection over union."""
+```
+
+- bbox：目标框，格式为(左上角x, 左上角y, 宽度, 高度)
+- candidates：候选框矩阵，每行格式与bbox相同
+
+## ​步骤1：坐标转换​
 
 
+```
+bbox_tl, bbox_br = bbox[:2], bbox[:2] + bbox[2:]
+candidates_tl = candidates[:, :2]
+candidates_br = candidates[:, :2] + candidates[:, 2:]
+```
+
+​作用​：将宽高格式转换为绝对坐标形式（左上角+右下角）
+`bbox_tl`：目标框左上角坐标 (x1, y1)
+`bbox_br`：目标框右下角坐标 (x1 + w, y1 + h)
+`candidates_tl/candidates_br`：候选框的左上/右下坐标矩阵
+
+## 步骤2：计算交集区域
+
+```
+tl = np.c_[
+    np.maximum(bbox_tl[0], candidates_tl[:, 0])[:, np.newaxis],
+    np.maximum(bbox_tl[1], candidates_tl[:, 1])[:, np.newaxis],
+]
+br = np.c_[
+    np.minimum(bbox_br[0], candidates_br[:, 0])[:, np.newaxis],
+    np.minimum(bbox_br[1], candidates_br[:, 1])[:, np.newaxis],
+]
+wh = np.maximum(0.0, br - tl)
+```
 
 
+1. ​交集左上角​：取两个框左上坐标的较大值（`np.maximum`）
+2. ​交集右下角​：取两个框右下坐标的较小值（`np.minimum`）
+3. ​维度处理​：通过`np.c_`和`np.newaxis`对齐矩阵维度，支持批量计算
+4. ​有效性检查​：若`br - tl`为负数（无交集），则置为0（`np.maximum(0.0, ...)`）
 
 
+## 步骤3：面积计算
+
+```
+area_intersection = wh.prod(axis=1)
+area_bbox = bbox[2:].prod()
+area_candidates = candidates[:, 2:].prod(axis=1)
+```
+
+- ​交集面积​：交集区域的宽高乘积（`prod(axis=1)`按行求积）
+- ​目标框面积​：宽度 × 高度
+- ​候选框面积​：每个候选框的宽度 × 高度
+
+## 步骤4：IoU计算
+
+```
+return area_intersection / (area_bbox + area_candidates - area_intersection)
+```
+
+- ​公式​：IoU = 交集面积 / (目标框面积 + 候选框面积 - 交集面积)
+- ​特性​：
+  - 结果范围在[0, 1]之间，值越大表示重叠度越高
+  - 支持批量处理（一次计算多个候选框的IoU）
+
+# 
+
+```
+def iou_cost(tracks, detections, track_indices=None, detection_indices=None):
+    """An intersection over union distance metric."""
+```
+
+- 功能​：计算跟踪目标（tracks）与检测框（detections）之间的IoU代价矩阵，用于目标跟踪中的关联匹配（如DeepSORT算法）。
+-  参数​：
+   -  tracks：跟踪器维护的轨迹列表，每个轨迹包含状态（如位置、速度）和更新信息。
+   -  detections：当前帧的检测框列表，每个检测框包含坐标（如ltwh格式）和置信度。
+   -  track_indices：需匹配的轨迹索引（默认全部）。
+   -  detection_indices：需匹配的检测框索引（默认全部）。
+
+## 步骤1：索引初始化
+
+```
+if track_indices is None:
+    track_indices = np.arange(len(tracks))
+if detection_indices is None:
+    detection_indices = np.arange(len(detections))
+```
+
+- ​作用​：若未指定索引，默认选择所有轨迹和检测框参与计算。
+- ​原理​：生成从0到N-1的连续索引，覆盖所有可能匹配项。
 
 
+## 步骤2：代价矩阵初始化
+
+```
+cost_matrix = np.zeros((len(track_indices), len(detection_indices)))
+candidates = np.asarray([detections[i].ltwh for i in detection_indices])
+```
+
+- 关键变量​：
+  - cost_matrix：初始化为全零矩阵，形状为 (轨迹数, 检测数)。
+  - candidates：提取检测框的坐标（ltwh格式，即 [左上x, 左上y, 宽, 高]）。
+- ​技巧​：直接提取检测框坐标，避免后续循环中重复访问对象属性。
 
 
+## 步骤3：遍历轨迹计算代价
 
+```
+for row, track_idx in enumerate(track_indices):
+    if tracks[track_idx].time_since_update > 1:
+        cost_matrix[row, :] = linear_assignment.INFTY_COST
+        continue
+    bbox = tracks[track_idx].to_ltwh()
+    cost_matrix[row, :] = 1.0 - iou(bbox, candidates)
+```
 
+- ​逻辑分解​：
+  - ​失效轨迹处理​：若轨迹超过1帧未更新（time_since_update > 1），将其代价设为极大值（INFTY_COST），表示不参与匹配。
+  - ​坐标转换​：将轨迹的状态（如Kalman滤波结果）转换为ltwh格式，与检测框格式一致。
+  - ​IoU计算​：调用iou()函数（需预先定义），计算当前轨迹与所有检测框的IoU值，再通过 1 - IoU 转换为代价（IoU越大，代价越小）。
+- ​关键函数​：
+  - iou(bbox, candidates)：计算单个轨迹框与多个检测框的IoU，返回一维数组。
+
+## ​步骤4：返回代价矩阵​
+
+```
+return cost_matrix
+```
+
+​输出​：形状为 (M, N) 的矩阵，用于匈牙利算法等匹配方法，寻找最优轨迹-检测关联。
