@@ -284,3 +284,74 @@ return cost_matrix
 ```
 
 ​输出​：形状为 (M, N) 的矩阵，用于匈牙利算法等匹配方法，寻找最优轨迹-检测关联。
+
+
+# NearestNeighborDistanceMetric
+
+这个 `NearestNeighborDistanceMetric` 类用于多目标跟踪中的特征距离计算，维护目标特征库并生成匹配成本矩阵。管理每个目标（跟踪对象）的特征样本，计算新特征与目标之间的最小距离，用于数据关联（如目标匹配）。
+
+## 初始化方法 __init__
+
+```
+def __init__(self, metric, matching_threshold, budget=None):
+    # 选择距离度量函数
+    if metric == "euclidean":
+        self._metric = _nn_euclidean_distance  # 欧氏距离（最近邻）
+    elif metric == "cosine":
+        self._metric = _nn_cosine_distance     # 余弦距离（最近邻）
+    else:
+        raise ValueError("Invalid metric")
+    # 设置匹配阈值和预算
+    self.matching_threshold = matching_threshold
+    self.budget = budget
+    self.samples = {}  # 存储目标特征：{target_id: [feature1, feature2, ...]}
+```
+
+- 参数​：
+  - metric: 距离度量方式（"euclidean"或"cosine"）。
+  - matching_threshold: 有效匹配的最大允许距离，超过此值的匹配被拒绝。
+  - budget: 每个目标保留的最大特征样本数（控制内存和计算量）。
+- ​作用​：初始化距离函数、阈值和特征库。
+
+## 更新特征库方法 partial_fit
+
+```
+def partial_fit(self, features, targets, active_targets):
+    for feature, target in zip(features, targets):
+        # 将特征添加到对应目标的样本列表
+        self.samples.setdefault(target, []).append(feature)
+        # 应用预算限制，保留最近budget个样本
+        if self.budget is not None:
+            self.samples[target] = self.samples[target][-self.budget :]
+    # 仅保留活跃目标，删除非活跃目标的特征
+    self.samples = {k: self.samples[k] for k in active_targets}
+```
+
+- ​参数​：
+  - features: 当前帧的检测特征矩阵（形状N×M，N为检测数，M为特征维度）。
+  - targets: 每个检测对应的目标ID（与features一一对应）。
+  - active_targets: 当前活跃的目标ID列表（未出现在此列表中的目标将被删除）。
+- ​作用​：更新目标特征库，保留最新样本并过滤非活跃目标。
+
+## 距离计算方法 distance
+
+```
+def distance(self, features, targets):
+    cost_matrix = np.zeros((len(targets), len(features)))
+    for i, target in enumerate(targets):
+        # 计算目标特征与当前检测特征的最小距离
+        cost_matrix[i, :] = self._metric(self.samples[target], features)
+    return cost_matrix
+```
+
+- ​参数​：
+  - features: 待匹配的检测特征矩阵（形状K×M，K为检测数）。
+  - targets: 需要计算距离的目标ID列表。
+- ​返回​：成本矩阵（形状len(targets)×len(features)），元素(i,j)表示目标targets[i]与检测features[j]的最小距离。
+- ​作用​：生成关联成本矩阵，用于匈牙利算法等匹配方法。
+
+
+
+
+
+
